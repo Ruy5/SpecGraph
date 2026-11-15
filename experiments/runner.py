@@ -4,6 +4,11 @@ The scenario supplies the code structure; the harness only translates it into
 fingerprints and hands them to the real ``scan``. Every number the metrics read
 comes back out of the real ``recall``, so nothing is computed twice, once by
 the system and once by the experiment.
+
+The graph lives in Neo4j by default, under a per-run project key that is
+dropped afterwards. ``store='memory'`` swaps in the offline stand-in. Verdicts
+come from the DeepSeek reviewer by default; ``reviewer='oracle'`` reads the
+scenario's ground truth instead.
 """
 
 from __future__ import annotations
@@ -11,6 +16,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -18,8 +24,10 @@ from typing import Iterable, Sequence
 from specgraph import govern
 from specgraph.query import recall
 
+from experiments.graph_store import neo4j_store
 from experiments.memory import MemoryGraph, installed
 from experiments.metrics import StepRecord
+from experiments.reviewer import DeepSeekReviewer, OracleReviewer
 from experiments.scenario import Scenario
 from experiments.variants import FULL, Variant, activated
 
@@ -53,32 +61,53 @@ def initial_state(scenario: Scenario) -> dict:
     return files
 
 
-def _verdict_reason(verdict: str) -> str:
-    if verdict == "invalidated":
-        return "oracle reviewer: the spec no longer matches the code"
-    return "oracle reviewer: the spec still matches the code"
+def _resolve_reviewer(reviewer):
+    if reviewer is None:
+        return DeepSeekReviewer.from_env()
+    if isinstance(reviewer, str):
+        if reviewer == "oracle":
+            return OracleReviewer()
+        if reviewer == "deepseek":
+            return DeepSeekReviewer.from_env()
+        raise ValueError("unknown reviewer %r; use 'deepseek' or 'oracle'" % (reviewer,))
+    return reviewer
+
+
+@contextmanager
+def _store(kind: str, scenario: Scenario, variant: Variant):
+    if kind == "memory":
+        memory = MemoryGraph()
+        with installed(memory):
+            yield memory
+        return
+    if kind == "neo4j":
+        with neo4j_store(scenario.name, variant.name) as store:
+            with installed(store):
+                yield store
+        return
+    raise ValueError("unknown store %r; use 'neo4j' or 'memory'" % (kind,))
 
 
 def run_scenario(
     scenario: Scenario,
     variant: Variant,
-    reviewer: str = "oracle",
-) -> list:
+    reviewer=None,
+    store: str = "neo4j",
+):
     """Return one StepRecord per step.
 
     ``reviewer='oracle'`` stands in for a correct human or agent reading the
-    pending set: it is the mechanism's ceiling, not a claim about real reviewers.
+    pending set: it is the mechanism's ceiling, not a claim about real
+    reviewers. The default reviewer is the model served over
+    ``SPECGRAPH_REVIEWER_BASE_URL``.
     """
-    if reviewer != "oracle":
-        raise ValueError("only the oracle reviewer is implemented, got %r" % (reviewer,))
-
-    memory = MemoryGraph()
+    judge = _resolve_reviewer(reviewer)
     records: list = []
     stale: set = set()
     known = set(scenario.spec_ids)
     body_versions: dict = {}
 
-    with installed(memory), activated(variant):
+    with _store(store, scenario, variant) as memory, activated(variant):
         for decl in scenario.specs:
             govern.create_spec(
                 ROOT,
@@ -113,7 +142,9 @@ def run_scenario(
             memory.fingerprints = copy.deepcopy(files)
             stale.update(step.newly_stale)
 
-            before_belief = {spec_id: node.belief for spec_id, node in memory.nodes.items()}
+            before_belief = {
+                spec_id: node.belief for spec_id, node in memory.load_graph().nodes.items()
+            }
             marked: set = set()
             if variant.scans:
                 report = govern.scan(ROOT, now=moment)
@@ -128,10 +159,10 @@ def run_scenario(
                 _expire_by_age(memory, scenario, variant.ttl_steps, index, moment)
 
             if variant.verify:
-                pending_now = [node.id for node in recall(memory.load_graph(), moment).pending]
-                for spec_id in pending_now:
-                    verdict = "invalidated" if spec_id in stale else "held"
-                    govern.verify(ROOT, spec_id, verdict, _verdict_reason(verdict), now=moment)
+                pending_now = recall(memory.load_graph(), moment).pending
+                for node in pending_now:
+                    verdict, reason = judge.decide(node, step, stale)
+                    govern.verify(ROOT, node.id, verdict, reason, now=moment)
 
             found = recall(memory.load_graph(), moment)
             trusted = frozenset(node.id for node in found.trusted)
@@ -155,24 +186,30 @@ def run_scenario(
     return records
 
 
-def _expire_by_age(memory: MemoryGraph, scenario: Scenario, ttl_steps: int, index: int, moment) -> None:
+def _expire_by_age(store, scenario: Scenario, ttl_steps: int, index: int, moment) -> None:
     """Fixed lifetime, staggered per spec so the baseline is not a strawman.
 
     Spec at position ``p`` expires after ``ttl_steps + p`` changes. Nothing in
     this path looks at the code, which is exactly the point of the comparison.
     """
+    nodes = store.load_graph(ROOT).nodes
     for position, decl in enumerate(scenario.specs):
         if index + 1 < ttl_steps + position:
             continue
-        node = memory.nodes.get(decl.id)
+        node = nodes.get(decl.id)
         if node is None or node.belief == "invalidated":
             continue
-        memory.update_belief(ROOT, decl.id, "invalidated", "ttl expired", moment, [], moment)
+        store.update_belief(ROOT, decl.id, "invalidated", "ttl expired", moment, [], moment)
 
 
-def run_all(scenario: Scenario, variants: Sequence = None) -> list:
+def run_all(
+    scenario: Scenario,
+    variants: Sequence | None = None,
+    reviewer=None,
+    store: str = "neo4j",
+) -> list:
     chosen: Iterable = variants if variants is not None else (FULL,)
     records: list = []
     for variant in chosen:
-        records.extend(run_scenario(scenario, variant))
+        records.extend(run_scenario(scenario, variant, reviewer=reviewer, store=store))
     return records

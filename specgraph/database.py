@@ -150,6 +150,15 @@ def read_events(root: Path) -> list[dict]:
     return _run(False, _read_events, project_key(root))
 
 
+def delete_project(root: Path) -> None:
+    """Remove every spec and event stored for this project.
+
+    The evaluation harness gives each run its own project key so repeated runs
+    cannot inherit each other's beliefs, then drops it when the run ends.
+    """
+    _run(True, _delete_project, project_key(root))
+
+
 def _read_graph(tx, project: str):
     props = [
         record["props"]
@@ -327,6 +336,11 @@ def _read_events(tx, project: str) -> list[dict]:
     ):
         events.append(json.loads(record["payload"]))
     return events
+
+
+def _delete_project(tx, project: str) -> None:
+    tx.run("MATCH (s:Spec {project: $project}) DETACH DELETE s", project=project)
+    tx.run("MATCH (e:Event {project: $project}) DETACH DELETE e", project=project)
 
 
 def _node(props: dict) -> SpecNode:

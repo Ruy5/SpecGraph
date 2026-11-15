@@ -1,7 +1,10 @@
-"""Offline evaluation harness for SpecGraph.
+"""Evaluation harness for SpecGraph.
 
-Not imported by the library: ``specgraph`` stays free of experiment-only code,
-so the shipped wheel is unchanged. Run it with ``python -m experiments``.
+Runs the real governance code against Neo4j (the default) or the offline memory
+stand-in, with verdicts from a served model (the default) or the scenario's
+ground truth. Not imported by the library: ``specgraph`` stays free of
+experiment-only code, so the shipped wheel is unchanged. Run it with
+``python -m experiments``.
 """
 
 from experiments.metrics import StepRecord, aggregate, bootstrap_ci, ratio

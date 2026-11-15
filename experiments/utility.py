@@ -155,14 +155,14 @@ def _truth_for(task: Task, record) -> Truth:
     return Truth(task.answer_valid, task.files_to_read)
 
 
-def run_tasks(scenario: Scenario, variant: Variant, policy: Policy, records=None) -> list:
+def run_tasks(scenario: Scenario, variant: Variant, policy: Policy, records=None, reviewer=None, store: str = "neo4j") -> list:
     """One outcome per (step, task) pair the scenario declares.
 
     ``records`` may be reused from the governance pass so the scenario is not
     replayed once per policy.
     """
     if records is None:
-        records = run_scenario(scenario, variant)
+        records = run_scenario(scenario, variant, reviewer=reviewer, store=store)
     relevant = [record for record in records if record.variant == variant.name]
     by_step = {record.step: record for record in relevant}
     outcomes: list = []
