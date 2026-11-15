@@ -18,7 +18,7 @@ LINK_KINDS = ("parent", "depends-on", "references", "implements")
 SINGLE_LINKS = ("parent",)
 LIST_LINKS = ("depends-on", "references", "implements")
 
-# Authoring lifecycle (ThinkRail) stays on ``status``. Governance state is
+# Authoring lifecycle stays on ``status``. Governance state is
 # ``belief`` so a code event can demand review without pretending the spec
 # was edited or retired.
 DEFAULT_BELIEF = "held"
