@@ -29,9 +29,7 @@ class SpecNode:
     id: str
     type: str
     title: str
-    path: str
     body: str
-    frontmatter: dict
     status: str | None = None
     valid_from: datetime | None = None
     valid_to: datetime | None = None
@@ -41,10 +39,6 @@ class SpecNode:
     perturbed_by: list[str] = field(default_factory=list)
     anchors: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
-
-    @property
-    def abs_path(self) -> str:
-        return self.path
 
 
 @dataclass

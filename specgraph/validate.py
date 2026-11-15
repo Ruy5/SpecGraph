@@ -23,7 +23,7 @@ def validate_graph(graph: SpecGraph) -> ValidationReport:
     report = ValidationReport()
     for edge in graph.edges:
         if edge.dst not in graph.nodes:
-            report.dangling.append(f"{edge.src} -{edge.kind}-> {edge.dst} ({graph.nodes[edge.src].path})")
+            report.dangling.append(f"{edge.src} -{edge.kind}-> {edge.dst}")
         if edge.belief is not None and edge.belief not in BELIEFS:
             report.beliefs.append(f"{edge.src} {edge.kind} belief {edge.belief}")
     for spec_id, paths in sorted(graph.duplicate_ids.items()):

@@ -7,10 +7,11 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from specgraph.database import create_spec as create_spec_node
+from specgraph.database import update_belief
 from specgraph.errors import SpecGraphError
 from specgraph.fingerprint import Fingerprint, SymbolChange, diff_fingerprints, language_of
-from specgraph.model import SPEC_TYPES, VERDICTS, SpecGraph
-from specgraph.parse import parse_document, read_text, scalar, splice_frontmatter, string_list, write_text
+from specgraph.model import SPEC_TYPES, VERDICTS, SpecGraph, SpecNode
 from specgraph.query import recall, temporally_current
 from specgraph.store import (
     append_event,
@@ -19,7 +20,7 @@ from specgraph.store import (
     load_snapshot,
     save_snapshot,
 )
-from specgraph.timeutil import dump_time, parse_time, utcnow
+from specgraph.timeutil import dump_time, utcnow
 
 
 @dataclass
@@ -88,11 +89,10 @@ def scan(root, since: str | None = None, now: datetime | None = None) -> ScanRep
         reason = f"{role}: " + "; ".join(evidence)
         event_id = _apply_belief(
             root,
-            node.path,
+            node,
             belief="suspicious",
             reason=reason,
             moment=moment,
-            event_id=None,
             close_interval=False,
         )
         append_event(
@@ -125,11 +125,10 @@ def verify(root, spec_id: str, verdict: str, reason: str, now: datetime | None =
     moment = now or utcnow()
     event_id = _apply_belief(
         root,
-        node.path,
+        node,
         belief=verdict,
         reason=reason.strip(),
         moment=moment,
-        event_id=None,
         close_interval=verdict == "invalidated",
     )
     event = _event(
@@ -170,72 +169,47 @@ def consume(root, spec_id: str, as_of: datetime | None = None) -> Consumption:
 
 def create_spec(
     root,
-    rel_path: str,
     spec_id: str,
     spec_type: str,
     title: str,
+    statement: str = "",
+    boundary: str = "",
     parent: str | None = None,
     anchors: list[str] | None = None,
     depends_on: list[str] | None = None,
     implements: list[str] | None = None,
     now: datetime | None = None,
-) -> Path:
+) -> str:
     if spec_type not in SPEC_TYPES:
         raise SpecGraphError(f"type must be one of {', '.join(SPEC_TYPES)}")
     root = Path(root).resolve()
-    path = _safe_path(root, rel_path)
-    if path.exists():
-        raise SpecGraphError(f"refusing to overwrite {rel_path}")
     moment = now or utcnow()
-    frontmatter = {
-        "id": spec_id,
-        "type": spec_type,
-        "status": "active",
-        "title": title,
-        "belief": "held",
-        "valid-from": dump_time(moment),
-    }
-    if parent:
-        frontmatter["parent"] = parent
-    if depends_on:
-        frontmatter["depends-on"] = depends_on
-    if implements:
-        frontmatter["implements"] = implements
-    if anchors:
-        frontmatter["anchors"] = anchors
-    body = f"# {title}\n\n## Statement\n\n## Boundary\n"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    write_text(path, splice_new(frontmatter, body))
-    return path
+    body = "\n\n".join(part.strip() for part in (statement, boundary) if part and part.strip())
+    create_spec_node(
+        root,
+        spec_id,
+        spec_type,
+        title,
+        body,
+        moment,
+        parent=parent,
+        anchors=anchors,
+        depends_on=depends_on,
+        implements=implements,
+    )
+    return spec_id
 
 
-def splice_new(frontmatter: dict, body: str) -> str:
-    from specgraph.parse import dump_mapping, join_document
-
-    return join_document(dump_mapping(frontmatter), body)
-
-
-def _apply_belief(root, rel_path: str, belief: str, reason: str, moment: datetime, event_id: str | None, close_interval: bool) -> str:
-    path = Path(root) / rel_path
-    text = read_text(path)
-    frontmatter, _body = parse_document(text)
-    if not isinstance(frontmatter, dict):
-        raise SpecGraphError(f"{rel_path} is not a spec")
-    identifier = event_id or uuid.uuid4().hex[:12]
-    frontmatter["belief"] = belief
-    frontmatter["belief-at"] = dump_time(moment)
-    frontmatter["belief-reason"] = reason
+def _apply_belief(root, node: SpecNode, belief: str, reason: str, moment: datetime, close_interval: bool) -> str:
+    identifier = uuid.uuid4().hex[:12]
     if belief == "held":
-        frontmatter["perturbed-by"] = []
+        perturbed: list[str] = []
     else:
-        perturbations = string_list(frontmatter, "perturbed-by")
-        perturbations.append(identifier)
-        frontmatter["perturbed-by"] = perturbations[-20:]
-    if close_interval:
-        existing = parse_time(scalar(frontmatter, "valid-to"))
-        if existing is None or existing > moment:
-            frontmatter["valid-to"] = dump_time(moment)
-    write_text(path, splice_frontmatter(text, frontmatter))
+        perturbed = [*node.perturbed_by, identifier][-20:]
+    valid_to = node.valid_to
+    if close_interval and (valid_to is None or valid_to > moment):
+        valid_to = moment
+    update_belief(root, node.id, belief, reason, moment, perturbed, valid_to)
     return identifier
 
 
@@ -421,18 +395,6 @@ def _read_worktree(root: Path, path: str) -> str | None:
     if b"\0" in data:
         return None
     return data.decode("utf-8", errors="replace")
-
-
-def _safe_path(root: Path, rel_path: str) -> Path:
-    rel = Path(rel_path)
-    if rel.is_absolute() or any(part == ".." for part in rel.parts):
-        raise SpecGraphError("spec path must stay inside the project")
-    if rel.suffix.lower() != ".md":
-        raise SpecGraphError("spec path must be a .md file")
-    target = (root / rel).resolve()
-    if target != root and root not in target.parents:
-        raise SpecGraphError("spec path must stay inside the project")
-    return target
 
 
 def _event(kind: str, moment: datetime, event_id: str | None = None, spec_id: str | None = None, detail: str = "", extra: dict | None = None) -> dict:
