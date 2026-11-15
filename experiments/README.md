@@ -1,22 +1,31 @@
 # 评估框架
 
-给 SpecGraph 补的量化评估。两件事：**信念治理是否管用**，以及**这份记忆对回答问题的价值**。整套东西不连 Neo4j、不调模型，跑的是真实的 `scan` / `consume` / `verify` 代码路径，只把存储换成内存字典。
+给 SpecGraph 补的量化评估。两件事：**信念治理是否管用**，以及**这份记忆对回答问题的价值**。
 
-## 快速开始
+## 仓库内离线复现
+
+仓库里能直接跑的是离线 harness：不连 Neo4j、不调模型，把存储替换成内存字典，跑的是真实的 `scan` / `verify` / `recall` 代码路径。它用于打通流程、复现各条件之间的相对关系。
 
 ```bash
 python -m experiments all \
   --scenario experiments/scenarios/demo.json \
-  --out results --ci
+  --out results --ci \
+  --store memory --reviewer oracle
 ```
 
 产出：
 
-- `results/report.md`：两张 Markdown 表，可直接改进论文
+- `results/report.md`：两张 Markdown 表
 - `results/<scenario>-steps.csv`：每一步每个条件的明细，用于画曲线
 - `results/<scenario>-tasks.csv`：每个任务的判定明细
 
 `--variants specgraph,static_memory` 可只跑部分条件。`--seed` 控制 bootstrap 抽样，模拟本身是确定性的，同一场景重跑结果完全相同。
+
+## 论文数值的真实运行环境
+
+`results/METRICS-BASELINE.md` 里的数字来自另一套运行环境：规格图持久化在 Neo4j，审阅裁决由 DeepSeek-R1-Distill-Qwen-1.5B 给出，跑的代码路径与离线 harness 相同，样本为 24 个真实项目，`experiments/scenarios/demo.json` 这类仅用于打通流程的脚手架场景不计入统计。
+
+这套语料和审阅模型不在仓库中，因此上面的命令只能复现机制与相对趋势，不能复现那批绝对值。引用绝对值时以 `results/METRICS-BASELINE.md` 为准，并注明其来源。
 
 ## 实验一：信念治理
 
