@@ -1,0 +1,230 @@
+{
+  "name": "checkout-service",
+  "description": "A small checkout service. Specs describe the module boundaries, the billing contract and the storage schema. The change sequence mixes three situations that a structural fingerprint can tell apart only poorly: a real contract break, a signature change with no semantic break, and a semantic break with no signature change.",
+  "ttl_steps": 3,
+  "specs": [
+    {
+      "id": "goal-checkout",
+      "type": "goal-and-requirements",
+      "title": "Checkout completes in one request",
+      "statement": "A customer can turn a cart into a paid order in a single round trip.",
+      "boundary": "Does not cover refunds or partial fulfilment."
+    },
+    {
+      "id": "arch-layering",
+      "type": "architecture-design",
+      "title": "Three-layer service",
+      "statement": "Transport, domain and storage layers stay separate; the domain layer never imports the transport layer."
+    },
+    {
+      "id": "storage-schema",
+      "type": "submodule-design",
+      "title": "Order record shape",
+      "statement": "The order record holds an id and the purchased items.",
+      "anchors": ["svc/storage.py#Order"],
+      "parent": "arch-layering"
+    },
+    {
+      "id": "billing-api",
+      "type": "module-design",
+      "title": "Billing module contract",
+      "statement": "The billing module charges a cart total in a caller-supplied currency.",
+      "boundary": "Currency conversion lives outside this module.",
+      "anchors": ["svc/billing.py#charge"],
+      "parent": "arch-layering",
+      "depends_on": ["storage-schema"]
+    },
+    {
+      "id": "auth-boundary",
+      "type": "module-design",
+      "title": "Auth module boundary",
+      "statement": "Session handling stays inside the auth module.",
+      "anchors": ["svc/auth.py#Session"],
+      "parent": "arch-layering"
+    },
+    {
+      "id": "notify-contract",
+      "type": "submodule-design",
+      "title": "Notification delivery contract",
+      "statement": "Order notifications are delivered before checkout returns.",
+      "anchors": ["svc/notify.py#send"],
+      "depends_on": ["billing-api"]
+    },
+    {
+      "id": "audit-log",
+      "type": "module-design",
+      "title": "Audit trail",
+      "statement": "Every order mutation is recorded with its prior value.",
+      "anchors": ["svc/audit.py#record"],
+      "depends_on": ["storage-schema"]
+    },
+    {
+      "id": "task-add-coupon",
+      "type": "task-spec",
+      "title": "Add coupon support to billing",
+      "statement": "A coupon reduces the charged total by a fixed amount.",
+      "anchors": ["svc/billing.py#apply_coupon"],
+      "implements": ["billing-api"]
+    }
+  ],
+  "steps": [
+    {
+      "label": "session-token",
+      "note": "A real contract break: callers must now pass a token.",
+      "changes": [
+        {
+          "path": "svc/auth.py",
+          "before": {
+            "Session": "|(user)|",
+            "Session.refresh": "|()|"
+          },
+          "after": {
+            "Session": "|(user, token, ttl=3600)|",
+            "Session.refresh": "|()|"
+          }
+        }
+      ],
+      "newly_stale": ["auth-boundary"],
+      "tasks": [
+        {
+          "id": "t-session",
+          "question": "How is a Session constructed?",
+          "target": "auth-boundary",
+          "answer_valid": "Session(user) opens a session for that user.",
+          "answer_stale": "Session(user, token, ttl) now requires an explicit token.",
+          "files_to_read": 1
+        }
+      ]
+    },
+    {
+      "label": "charge-currency-default",
+      "note": "Signature changed, meaning did not: every caller passes a currency explicitly.",
+      "changes": [
+        {
+          "path": "svc/billing.py",
+          "before": {
+            "charge": "|(amount, currency='USD')|",
+            "apply_coupon": "|(code, amount)|"
+          },
+          "after": {
+            "charge": "|(amount, currency='EUR')|",
+            "apply_coupon": "|(code, amount)|"
+          }
+        }
+      ],
+      "newly_stale": [],
+      "tasks": [
+        {
+          "id": "t-charge",
+          "question": "Which currency does charge default to?",
+          "target": "billing-api",
+          "answer_valid": "charge defaults to USD; callers pass the currency anyway.",
+          "answer_stale": "charge defaults to EUR.",
+          "files_to_read": 1
+        }
+      ]
+    },
+    {
+      "label": "notify-async",
+      "note": "Meaning changed, signature did not: delivery became asynchronous. Invisible to a structure diff.",
+      "changes": [
+        {
+          "path": "svc/notify.py",
+          "before": {
+            "send": "|(order_id, channel)|"
+          },
+          "after": {
+            "send": "|(order_id, channel)|"
+          },
+          "body_changed": true
+        }
+      ],
+      "newly_stale": ["notify-contract"],
+      "tasks": [
+        {
+          "id": "t-notify",
+          "question": "Is a notification delivered before checkout returns?",
+          "target": "notify-contract",
+          "answer_valid": "Yes, delivery happens before checkout returns.",
+          "answer_stale": "No, the notification is queued and delivered asynchronously.",
+          "files_to_read": 2
+        }
+      ]
+    },
+    {
+      "label": "order-fields",
+      "note": "A record shape change that really does reach its dependents.",
+      "changes": [
+        {
+          "path": "svc/storage.py",
+          "before": {
+            "Order": "|(id, items)|",
+            "Order.save": "|()|"
+          },
+          "after": {
+            "Order": "|(id, items, currency)|",
+            "Order.save": "|()|"
+          }
+        }
+      ],
+      "newly_stale": ["storage-schema", "billing-api", "audit-log"],
+      "tasks": [
+        {
+          "id": "t-order",
+          "question": "Which fields does an Order record hold?",
+          "target": "storage-schema",
+          "answer_valid": "An Order holds an id and its items.",
+          "answer_stale": "An Order also holds a currency field.",
+          "files_to_read": 1
+        }
+      ]
+    },
+    {
+      "label": "coupon-optional-param",
+      "note": "A backward-compatible optional parameter. Structure moves, meaning does not.",
+      "changes": [
+        {
+          "path": "svc/billing.py",
+          "before": {
+            "charge": "|(amount, currency='EUR')|",
+            "apply_coupon": "|(code, amount)|"
+          },
+          "after": {
+            "charge": "|(amount, currency='EUR')|",
+            "apply_coupon": "|(code, amount, stackable=False)|"
+          }
+        }
+      ],
+      "newly_stale": [],
+      "tasks": [
+        {
+          "id": "t-coupon",
+          "question": "What does apply_coupon take?",
+          "target": "task-add-coupon",
+          "answer_valid": "apply_coupon takes a code and an amount.",
+          "answer_stale": "apply_coupon also accepts a stackable flag.",
+          "files_to_read": 1
+        }
+      ]
+    },
+    {
+      "label": "coupon-body-tidy",
+      "note": "Body-only edit. Neither a structure diff nor a validity change.",
+      "changes": [
+        {
+          "path": "svc/billing.py",
+          "before": {
+            "charge": "|(amount, currency='EUR')|",
+            "apply_coupon": "|(code, amount, stackable=False)|"
+          },
+          "after": {
+            "charge": "|(amount, currency='EUR')|",
+            "apply_coupon": "|(code, amount, stackable=False)|"
+          },
+          "body_changed": true
+        }
+      ],
+      "newly_stale": []
+    }
+  ]
+}

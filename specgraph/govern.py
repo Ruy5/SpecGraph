@@ -7,19 +7,17 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from specgraph.database import append_event
 from specgraph.database import create_spec as create_spec_node
+from specgraph.database import link_specs as link_specs_node
+from specgraph.database import load_graph, read_events
+from specgraph.database import set_status as set_status_node
 from specgraph.database import update_belief
 from specgraph.errors import SpecGraphError
 from specgraph.fingerprint import Fingerprint, SymbolChange, diff_fingerprints, language_of
-from specgraph.model import SPEC_TYPES, VERDICTS, SpecGraph, SpecNode
+from specgraph.model import LINK_KINDS, SPEC_TYPES, VERDICTS, SpecGraph, SpecNode
 from specgraph.query import recall, temporally_current
-from specgraph.store import (
-    append_event,
-    code_fingerprints,
-    load_graph,
-    load_snapshot,
-    save_snapshot,
-)
+from specgraph.store import code_fingerprints, load_snapshot, save_snapshot
 from specgraph.timeutil import dump_time, utcnow
 
 
@@ -178,6 +176,9 @@ def create_spec(
     anchors: list[str] | None = None,
     depends_on: list[str] | None = None,
     implements: list[str] | None = None,
+    references: list[str] | None = None,
+    tags: list[str] | None = None,
+    status: str = "active",
     now: datetime | None = None,
 ) -> str:
     if spec_type not in SPEC_TYPES:
@@ -196,8 +197,60 @@ def create_spec(
         anchors=anchors,
         depends_on=depends_on,
         implements=implements,
+        references=references,
+        tags=tags,
+        status=status,
+    )
+    append_event(
+        root,
+        _event(
+            "create",
+            moment,
+            spec_id=spec_id,
+            detail=f"created {spec_type}: {title}",
+            extra={"type": spec_type, "status": status, "anchors": list(anchors or [])},
+        ),
     )
     return spec_id
+
+
+def link(root, src: str, dst: str, kind: str, now: datetime | None = None) -> dict:
+    """Add a typed relationship between two existing specs."""
+    if kind not in LINK_KINDS:
+        raise SpecGraphError(f"link kind must be one of {', '.join(LINK_KINDS)}")
+    root = Path(root).resolve()
+    moment = now or utcnow()
+    link_specs_node(root, src, dst, kind)
+    event = _event(
+        "link",
+        moment,
+        spec_id=src,
+        detail=f"{src} -{kind}-> {dst}",
+        extra={"dst": dst, "kind": kind},
+    )
+    append_event(root, event)
+    return event
+
+
+def set_status(root, spec_id: str, status: str, now: datetime | None = None) -> dict:
+    """Move a spec along its authoring lifecycle without touching its belief."""
+    root = Path(root).resolve()
+    moment = now or utcnow()
+    set_status_node(root, spec_id, status, moment)
+    event = _event(
+        "status",
+        moment,
+        spec_id=spec_id,
+        detail=f"status -> {status}",
+        extra={"status": status},
+    )
+    append_event(root, event)
+    return event
+
+
+def events(root) -> list[dict]:
+    """Return the governance trail in chronological order."""
+    return read_events(Path(root).resolve())
 
 
 def _apply_belief(root, node: SpecNode, belief: str, reason: str, moment: datetime, close_interval: bool) -> str:

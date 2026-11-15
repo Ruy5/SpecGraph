@@ -6,9 +6,22 @@ Code-structure changes may set a belief to ``suspicious``; only an agent
 verification at consumption time may set it to ``invalidated``.
 """
 
-from specgraph.govern import consume, scan, verify
-from specgraph.query import recall
-from specgraph.store import load_graph
+from specgraph.database import load_graph
+from specgraph.govern import consume, create_spec, events, link, scan, set_status, verify
+from specgraph.query import recall, slice_graph
+from specgraph.validate import validate_graph
 
-__all__ = ["consume", "load_graph", "recall", "scan", "verify"]
+__all__ = [
+    "consume",
+    "create_spec",
+    "events",
+    "link",
+    "load_graph",
+    "recall",
+    "scan",
+    "set_status",
+    "slice_graph",
+    "validate_graph",
+    "verify",
+]
 __version__ = "0.1.0"

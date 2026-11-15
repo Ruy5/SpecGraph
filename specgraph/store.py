@@ -5,7 +5,6 @@ import json
 import os
 from pathlib import Path
 
-from specgraph.database import append_event, load_graph, read_events
 from specgraph.fingerprint import Fingerprint, fingerprint_source, language_of
 
 IGNORED_DIRS = {
@@ -65,7 +64,9 @@ def save_snapshot(root: Path, files: dict[str, dict]) -> None:
     path = snapshot_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
     text = json.dumps({"version": SNAPSHOT_VERSION, "files": files}, indent=2, sort_keys=True)
-    path.write_text(text + "\n", encoding="utf-8", newline="\n")
+    # ``Path.write_text(newline=...)`` only exists on 3.10+; keep the declared 3.9 floor.
+    with path.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text + "\n")
 
 
 def _code_files(root: Path) -> list[Path]:

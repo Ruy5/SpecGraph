@@ -35,9 +35,9 @@ SpecGraph 给代码智能体维护一份项目级工程记忆。架构规格放�
 - `valid_from` / `valid_to`：这段记忆在哪段时间里算数。区间左闭右开；没有 `valid_to` 表示向后开放。
 - `belief`：`held`、`suspicious`、`invalidated`、`unverifiable`。
 
-关系是 `PARENT`、`DEPENDS_ON`、`REFERENCES`、`IMPLEMENTS`。`status` 只表示编写进度：`draft`、`active`、`stale`、`done`、`deprecated`。代码变更改的是 `belief`。
+关系是 `PARENT`、`DEPENDS_ON`、`REFERENCES`、`IMPLEMENTS`。四种关系都能在写入规格时指定，也能之后用 `link` 补上。`status` 只表示编写进度：`draft`、`active`、`stale`、`done`、`deprecated`，由 `status` 命令或 `set_status` 变更，不改变 `belief`；代码变更改的只是 `belief`。
 
-`baseline`、`perturb`、`verify` 记成 `Event` 节点，并连回对应规格。项目用 `SPECGRAPH_PROJECT` 区分；不设置时使用仓库路径。
+`create`、`link`、`status`、`baseline`、`perturb`、`verify` 记成 `Event` 节点，并连回对应规格，构成可沿时间追溯的治理轨迹。项目用 `SPECGRAPH_PROJECT` 区分；不设置时使用仓库路径。
 
 ## 变更只标可疑
 
@@ -67,7 +67,31 @@ SpecGraph 给代码智能体维护一份项目级工程记忆。架构规格放�
 
 闭环是：变更触发，可疑标记，消费时语义校验，状态写回。
 
+## 实现分层
+
+| 模块 | 职责 |
+| --- | --- |
+| `model.py`、`timeutil.py` | 规格、边、图的数据结构，以及左闭右开的时间区间 |
+| `fingerprint.py` | Python 语法树与 JS/TS 声明抽取，产出符号签名并做结构差分 |
+| `store.py` | 遍历代码、读写 `.specgraph/structure.json` 差分基线 |
+| `database.py` | Neo4j 持久化：节点、关系、事件与唯一约束；驱动惰性加载 |
+| `query.py` | 按时刻召回、抑制已完成任务、沿关系切片 |
+| `validate.py` | 悬空边、父环、空区间、非法信念与锚点缺失检查 |
+| `govern.py` | `scan` / `consume` / `verify` 闭环，以及规格写入与状态变更 |
+| `cli.py` | 统一命令行入口，把上述能力串成一条可操作的路径 |
+
+`store.py` 只管本地代码快照，`database.py` 只管图，`govern.py` 组合两者；纯逻辑模块不依赖 Neo4j 驱动。
+
 ## 调用
+
+安装与连接：
+
+```bash
+pip install -e .
+# bash: export SPECGRAPH_NEO4J_PASSWORD=your-password
+# PowerShell: $env:SPECGRAPH_NEO4J_PASSWORD = "your-password"
+specgraph init
+```
 
 - `SPECGRAPH_NEO4J_URI`，默认 `bolt://localhost:7687`
 - `SPECGRAPH_NEO4J_USER`，默认 `neo4j`
@@ -75,9 +99,41 @@ SpecGraph 给代码智能体维护一份项目级工程记忆。架构规格放�
 - `SPECGRAPH_NEO4J_DATABASE`，默认 `neo4j`
 - `SPECGRAPH_PROJECT`，可选
 
+`fingerprint` 是纯本地命令，只遍历代码、不加载驱动也不连接数据库；直接从源码运行 `python -m specgraph` 时，即使没装 neo4j 驱动也能用它和 `--help`。其余命令在真正访问图时才加载驱动，缺少驱动或连不上库会给出一句明确的错误和退出码 2，而不是 traceback。
+
+### 命令行
+
+| 命令 | 作用 |
+| --- | --- |
+| `init` | 校验连接并建立唯一约束 |
+| `create` / `link` / `status` | 写规格、补关系、改编写进度 |
+| `scan` | 结构差分，把受影响的规格标成 `suspicious` |
+| `recall` / `consume` | 按时刻召回，或裁决单条规格能否使用 |
+| `verify` | 写入三态裁决，必须带理由 |
+| `slice` / `events` | 沿关系切片，查看治理轨迹 |
+| `validate` | 结构性校验，有问题时退出码为 1 |
+| `fingerprint` | 查看当前代码符号，不接触数据库 |
+
+全局参数 `--root`（默认当前目录）和 `--json`（机器可读输出）可以放在命令前或命令后。`--as-of` 接受 ISO 8601 时间戳，用于按历史时刻召回。
+
+```bash
+specgraph create auth-boundary --type module-design --title "Auth module boundary" \
+  --statement "Session handling stays inside the auth module." \
+  --anchor "pkg/auth.py#Session"
+specgraph scan
+specgraph recall
+specgraph consume auth-boundary
+specgraph verify auth-boundary --verdict held \
+  --reason "The session boundary still matches the code."
+specgraph events --spec auth-boundary
+```
+
+`create` 还可接 `--parent`、`--depends-on`、`--implements`、`--references`、`--tag`、`--boundary`、`--status`；`scan --since <git-ref>` 改为与某次 git 修订比较。
+
+### Python
+
 ```python
-from specgraph import consume, load_graph, recall, scan, verify
-from specgraph.govern import create_spec
+from specgraph import consume, create_spec, load_graph, recall, scan, verify
 
 create_spec(
     ".",
@@ -94,6 +150,16 @@ decision = consume(".", "auth-boundary")
 if decision.status == "pending":
     verify(".", "auth-boundary", "held", "The session boundary still matches the code.")
 ```
+
+包级还导出 `link`、`set_status`、`events`、`slice_graph`、`validate_graph`。
+
+## 测试
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+测试只依赖标准库，用替身隔离 Neo4j，覆盖时态召回、三态裁决、结构差分、一跳传播、锚点匹配、图校验与命令行入口。
 
 ## 固有局限
 
